@@ -46,6 +46,10 @@ export interface CitizenRequest {
   userId?: string; // Link to user profile
   isAnonymous: boolean;
   nation: BRICSNationCode;
+  state?: string;
+  district?: string;
+  subDistrictWard?: string;
+  detailedAddress?: string;
   region: string;
   channel: SubmissionChannel;
   originalLanguage: string;
@@ -53,6 +57,7 @@ export interface CitizenRequest {
   translatedEnglishText?: string;
   category: RequestCategory;
   urgency: UrgencyLevel;
+  photoUrl?: string; // Uploaded civic issue proof
   audioUrl?: string;
   hasAudioTranscription?: boolean;
   geocodedLocation?: {
@@ -78,6 +83,7 @@ export interface HotspotCluster {
   id: string;
   title: string;
   nation: BRICSNationCode;
+  state?: string;
   region: string;
   category: RequestCategory;
   citizenDemandCount: number;

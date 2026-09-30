@@ -43,8 +43,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   setTheme,
   userReportsCount = 0
 }) => {
-  const currentNationData = BRICS_NATIONS[selectedNation];
-
   const handleAuth = async () => {
     if (currentUser) {
       await logoutUser();
@@ -65,7 +63,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   const isLight = theme === 'light';
   const isBrics = theme === 'brics_gold';
 
-  // Navigation styling dependent on active theme
   const navContainerClass = isLight 
     ? 'bg-white/90 border-b border-slate-200 text-slate-800'
     : isBrics 
@@ -217,16 +214,12 @@ export const Navbar: React.FC<NavbarProps> = ({
                     : 'bg-slate-900 border-slate-800 hover:border-slate-700'
                 }`}
               >
-                {currentUser.photoURL ? (
-                  <img src={currentUser.photoURL} alt={currentUser.displayName || ''} className="w-6 h-6 rounded-full object-cover" />
-                ) : (
-                  <div className="w-6 h-6 rounded-full bg-emerald-600/30 text-emerald-400 flex items-center justify-center text-[11px] font-bold">
-                    {currentUser.displayName ? currentUser.displayName[0] : 'U'}
-                  </div>
-                )}
+                <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center text-[11px] font-bold shadow select-none">
+                  {currentUser.displayName ? currentUser.displayName[0].toUpperCase() : (currentUser.email ? currentUser.email[0].toUpperCase() : 'U')}
+                </div>
                 <div className="hidden sm:block text-left">
                   <p className={`text-[10px] font-bold truncate max-w-[85px] leading-tight ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>
-                    {currentUser.displayName?.split(' ')[0] || 'Aryan'}
+                    {currentUser.displayName?.split(' ')[0] || 'User'}
                   </p>
                   <p className="text-[9px] text-emerald-400 leading-tight">Dashboard</p>
                 </div>

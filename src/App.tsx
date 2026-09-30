@@ -11,7 +11,7 @@ import { INITIAL_HOTSPOTS, INITIAL_CITIZEN_REQUESTS, BRICS_NATIONS } from './dat
 import { BRICSNationCode, HotspotCluster, CitizenRequest, AppTheme } from './types';
 import { auth, db, getStoredUser, AppUserProfile } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, limit, doc, deleteDoc } from 'firebase/firestore';
 import confetti from 'canvas-confetti';
 
 export default function App() {
@@ -121,6 +121,20 @@ export default function App() {
     setCurrentTab('policymaker');
   };
 
+  const handleDeleteRequest = async (requestId: string) => {
+    // 1. Immediately update local state
+    setCitizenRequests(prev => prev.filter(r => (r.id !== requestId && r.timestamp !== requestId)));
+    
+    // 2. If it has a Firestore ID, delete from database
+    try {
+      if (requestId && !requestId.startsWith('req-init')) {
+        await deleteDoc(doc(db, 'citizen_requests', requestId));
+      }
+    } catch (e) {
+      console.warn("Firestore delete notice:", e);
+    }
+  };
+
   // User's own submitted report count
   const myReportsCount = citizenRequests.filter(req => {
     if (!currentUser) return false;
@@ -132,7 +146,7 @@ export default function App() {
 
   // Root background classes matching theme
   const rootThemeClass = theme === 'light'
-    ? 'bg-slate-50 text-slate-800 selection:bg-emerald-200 selection:text-emerald-900'
+    ? 'light-mode bg-slate-50 text-slate-900 selection:bg-emerald-200 selection:text-emerald-900'
     : theme === 'brics_gold'
     ? 'bg-[#0c0a06] text-amber-100 selection:bg-amber-500/30 selection:text-amber-200'
     : 'bg-slate-950 text-slate-100 selection:bg-emerald-500/30 selection:text-emerald-200';
@@ -170,6 +184,7 @@ export default function App() {
             theme={theme}
             onNavigateToTab={setCurrentTab}
             onSelectHotspot={handleSelectHotspot}
+            onDeleteRequest={handleDeleteRequest}
           />
         )}
 
@@ -180,6 +195,7 @@ export default function App() {
             citizenRequests={citizenRequests}
             onSelectHotspot={handleSelectHotspot}
             onNavigateToPolicy={() => setCurrentTab('policymaker')}
+            theme={theme}
           />
         )}
 
@@ -188,6 +204,7 @@ export default function App() {
             selectedNation={selectedNation}
             onRequestSubmitted={handleRequestSubmitted}
             currentUser={currentUser}
+            theme={theme}
           />
         )}
 

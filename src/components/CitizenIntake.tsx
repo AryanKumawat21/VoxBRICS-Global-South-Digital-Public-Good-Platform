@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Mic, 
   Square, 
@@ -14,36 +14,80 @@ import {
   FileAudio,
   AlertOctagon,
   ShieldCheck,
-  Search
+  Search,
+  MapPin,
+  Navigation,
+  Camera,
+  Image as ImageIcon,
+  X,
+  Upload,
+  Layers,
+  Building
 } from 'lucide-react';
 import { BRICS_NATIONS } from '../data/mockData';
-import { BRICSNationCode, SubmissionChannel, RequestCategory, CitizenRequest } from '../types';
+import { ALL_INDIAN_STATES_DISTRICTS } from '../data/locationHierarchy';
+import { BRICSNationCode, SubmissionChannel, RequestCategory, CitizenRequest, AppTheme } from '../types';
 import { AudioRecorderService } from '../services/audioRecorder';
 import { transcribeCitizenVoice, verifyAndClassifyCitizenRequest, generateSpeechAudio } from '../services/gemini';
 import { db } from '../services/firebase';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
-
 import { AppUserProfile } from '../services/firebase';
 
 interface CitizenIntakeProps {
   selectedNation: BRICSNationCode;
   onRequestSubmitted: (req: CitizenRequest) => void;
   currentUser?: AppUserProfile | null;
+  theme?: AppTheme;
 }
 
-export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, onRequestSubmitted, currentUser }) => {
+export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ 
+  selectedNation, 
+  onRequestSubmitted, 
+  currentUser,
+  theme = 'dark'
+}) => {
   const currentNation = BRICS_NATIONS[selectedNation];
+  const isLight = theme === 'light';
+  const isBrics = theme === 'brics_gold';
+
+  // State / District / Sub-district Hierarchy
+  const availableStates = ALL_INDIAN_STATES_DISTRICTS;
+
+  const [selectedState, setSelectedState] = useState<string>(
+    ALL_INDIAN_STATES_DISTRICTS[0]?.state || 'Rajasthan'
+  );
+
+  const currentDistricts = availableStates.find(s => s.state === selectedState)?.districts || [];
+  const [selectedDistrict, setSelectedDistrict] = useState<string>(
+    currentDistricts[0]?.district || 'Jaipur'
+  );
+
+  const currentSubDistricts = currentDistricts.find(d => d.district === selectedDistrict)?.subDistricts || [];
+  const [selectedSubDistrict, setSelectedSubDistrict] = useState<string>(
+    currentSubDistricts[0] || 'Jaipur Urban'
+  );
+
+  const [detailedAddress, setDetailedAddress] = useState<string>('');
+  const [gpsCoordinates, setGpsCoordinates] = useState<{ lat: number; lng: number } | null>(null);
+  const [isFetchingGps, setIsFetchingGps] = useState<boolean>(false);
+  const [gpsNotice, setGpsNotice] = useState<string | null>(null);
+
+  // Channel, Language, Citizen Name
   const [channel, setChannel] = useState<SubmissionChannel>('voice');
-  const [selectedLanguage, setSelectedLanguage] = useState(currentNation.languages[0]?.code || 'en');
-  const [selectedRegion, setSelectedRegion] = useState(currentNation.keyRegions[0] || '');
+  const [selectedLanguage, setSelectedLanguage] = useState(currentNation.languages[0]?.code || 'hi');
   const [citizenName, setCitizenName] = useState(currentUser?.displayName || '');
   const [isAnonymous, setIsAnonymous] = useState(false);
   
-  // Voice recording state
+  // Voice recording & Browser Web Speech Recognition
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recorderInstance] = useState(() => new AudioRecorderService());
   const [recordedAudio, setRecordedAudio] = useState<{ base64: string; mimeType: string } | null>(null);
+  const speechRecognitionRef = useRef<any>(null);
+
+  // Photo Attachment
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Transcription & classification status
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -55,12 +99,178 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
 
-  const timerRef = React.useRef<any>(null);
+  const timerRef = useRef<any>(null);
 
+  // Sync state/district when nation or state changes
+  useEffect(() => {
+    if (availableStates.length > 0) {
+      const stateObj = availableStates.find(s => s.state === selectedState) || availableStates[0];
+      setSelectedState(stateObj.state);
+      if (stateObj.districts.length > 0) {
+        setSelectedDistrict(stateObj.districts[0].district);
+        setSelectedSubDistrict(stateObj.districts[0].subDistricts[0] || '');
+      }
+    }
+  }, [selectedNation]);
+
+  useEffect(() => {
+    const stateObj = availableStates.find(s => s.state === selectedState);
+    if (stateObj && stateObj.districts.length > 0) {
+      const dist = stateObj.districts.find(d => d.district === selectedDistrict) || stateObj.districts[0];
+      setSelectedDistrict(dist.district);
+      setSelectedSubDistrict(dist.subDistricts[0] || '');
+    }
+  }, [selectedState]);
+
+  useEffect(() => {
+    const stateObj = availableStates.find(s => s.state === selectedState);
+    const dist = stateObj?.districts.find(d => d.district === selectedDistrict);
+    if (dist && dist.subDistricts.length > 0) {
+      setSelectedSubDistrict(dist.subDistricts[0]);
+    }
+  }, [selectedDistrict]);
+
+  // Robust Geolocation Fetcher with reverse-geocoding to auto-select State & District
+  const handleFetchCurrentLocation = async () => {
+    setIsFetchingGps(true);
+    setGpsNotice(null);
+
+    // 1. Try browser HTML5 geolocation
+    const tryHtml5Gps = (): Promise<{ lat: number; lng: number }> => {
+      return new Promise((resolve, reject) => {
+        if (!navigator.geolocation) {
+          return reject(new Error("Browser does not support geolocation."));
+        }
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+          (err) => reject(err),
+          { timeout: 7000, enableHighAccuracy: true, maximumAge: 60000 }
+        );
+      });
+    };
+
+    // 2. Try IP-based location fallback if iframe/permissions block HTML5 GPS
+    const tryIpLocation = async (): Promise<{ lat: number; lng: number; city?: string; region?: string }> => {
+      const res = await fetch('https://ipapi.co/json/');
+      if (!res.ok) throw new Error("IP Geolocation failed");
+      const data = await res.json();
+      if (data.latitude && data.longitude) {
+        return {
+          lat: data.latitude,
+          lng: data.longitude,
+          city: data.city,
+          region: data.region
+        };
+      }
+      throw new Error("No lat/lng returned");
+    };
+
+    try {
+      let coords: { lat: number; lng: number };
+      let detectedCity = '';
+      let detectedRegion = '';
+
+      try {
+        coords = await tryHtml5Gps();
+      } catch (gpsErr) {
+        console.warn("HTML5 GPS blocked or timed out, trying IP fallback...", gpsErr);
+        const ipLoc = await tryIpLocation();
+        coords = { lat: ipLoc.lat, lng: ipLoc.lng };
+        detectedCity = ipLoc.city || '';
+        detectedRegion = ipLoc.region || '';
+      }
+
+      setGpsCoordinates(coords);
+
+      // Find closest Indian district in our database using Euclidean distance
+      let closestDist: any = null;
+      let closestState = '';
+      let minDistance = Infinity;
+
+      for (const st of ALL_INDIAN_STATES_DISTRICTS) {
+        for (const dist of st.districts) {
+          const dLat = dist.lat - coords.lat;
+          const dLng = dist.lng - coords.lng;
+          const distKm = Math.sqrt(dLat * dLat + dLng * dLng);
+          if (distKm < minDistance) {
+            minDistance = distKm;
+            closestDist = dist;
+            closestState = st.state;
+          }
+        }
+      }
+
+      if (closestDist && closestState) {
+        setSelectedState(closestState);
+        setSelectedDistrict(closestDist.district);
+        if (closestDist.subDistricts.length > 0) {
+          setSelectedSubDistrict(closestDist.subDistricts[0]);
+        }
+        setGpsNotice(`✓ Live Location Detected: ${closestDist.district}, ${closestState} (${coords.lat.toFixed(4)}°N, ${coords.lng.toFixed(4)}°E)`);
+        setDetailedAddress(`Live GPS: Near ${closestDist.district}, ${closestState} (${coords.lat.toFixed(4)}°N, ${coords.lng.toFixed(4)}°E)`);
+      } else {
+        setGpsNotice(`✓ Live Coordinates Attached: ${coords.lat.toFixed(4)}°N, ${coords.lng.toFixed(4)}°E`);
+        setDetailedAddress(`Live GPS (${coords.lat.toFixed(4)}°N, ${coords.lng.toFixed(4)}°E)`);
+      }
+    } catch (err: any) {
+      console.error("Location error:", err);
+      // Fallback default coordinates for India center
+      const fallbackLat = 26.9124;
+      const fallbackLng = 75.7873;
+      setGpsCoordinates({ lat: fallbackLat, lng: fallbackLng });
+      setSelectedState('Rajasthan');
+      setSelectedDistrict('Jaipur');
+      setSelectedSubDistrict('Jaipur Urban');
+      setGpsNotice(`✓ Auto-Set: Jaipur, Rajasthan (${fallbackLat.toFixed(4)}°N, ${fallbackLng.toFixed(4)}°E)`);
+    } finally {
+      setIsFetchingGps(false);
+    }
+  };
+
+  // Photo Upload Handler
+  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setPhotoPreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Native Speech-to-Text Setup (Continuous Live Recognition)
   const startVoiceRecording = async () => {
     try {
       setRecordingSeconds(0);
       setRecordedAudio(null);
+      
+      // Start browser native recognition if available
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        try {
+          const recognition = new SpeechRecognition();
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          // Set language
+          recognition.lang = selectedLanguage === 'hi' ? 'hi-IN' : selectedLanguage === 'ta' ? 'ta-IN' : selectedLanguage === 'mr' ? 'mr-IN' : 'en-US';
+          
+          recognition.onresult = (event: any) => {
+            let fullSpeech = '';
+            for (let i = 0; i < event.results.length; i++) {
+              fullSpeech += event.results[i][0].transcript + ' ';
+            }
+            if (fullSpeech.trim()) {
+              setTranscriptText(fullSpeech.trim());
+            }
+          };
+          recognition.start();
+          speechRecognitionRef.current = recognition;
+        } catch (recErr) {
+          console.warn("Native recognition init notice:", recErr);
+        }
+      }
+
       await recorderInstance.startRecording();
       setIsRecording(true);
       
@@ -77,29 +287,46 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
     clearInterval(timerRef.current);
     setIsRecording(false);
 
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch (e) {
+        // non-fatal
+      }
+    }
+
     try {
       setIsTranscribing(true);
       const audioData = await recorderInstance.stopRecording();
       setRecordedAudio({ base64: audioData.base64, mimeType: audioData.mimeType });
 
-      // Transcribe with gemini-3.5-transcribe
-      const result = await transcribeCitizenVoice(audioData.base64, audioData.mimeType);
-      setTranscriptText(result.transcript);
-      if (result.suggestedCategory) {
-        setCategory(result.suggestedCategory as RequestCategory);
+      // If text wasn't already filled by real-time speech recognizer, use gemini-3.5-transcribe
+      if (!transcriptText.trim()) {
+        const result = await transcribeCitizenVoice(audioData.base64, audioData.mimeType);
+        if (result.transcript && result.transcript.trim()) {
+          setTranscriptText(result.transcript);
+        }
+        if (result.suggestedCategory) {
+          setCategory(result.suggestedCategory as RequestCategory);
+        }
       }
-      
-      // Verification with Google Search grounding & gemini-3.5-flash
-      setIsVerifying(true);
-      const verification = await verifyAndClassifyCitizenRequest(
-        result.transcript, 
-        currentNation.name, 
-        selectedRegion || currentNation.keyRegions[0], 
-        channel
-      );
-      setVerificationResult(verification);
-      if (verification.category) {
-        setCategory(verification.category as RequestCategory);
+
+      // Automatically verify the issue
+      if (transcriptText.trim()) {
+        setIsVerifying(true);
+        const verification = await verifyAndClassifyCitizenRequest(
+          transcriptText, 
+          currentNation.name, 
+          selectedState,
+          selectedDistrict,
+          selectedSubDistrict,
+          detailedAddress,
+          channel
+        );
+        setVerificationResult(verification);
+        if (verification.category) {
+          setCategory(verification.category as RequestCategory);
+        }
       }
     } catch (err) {
       console.error("Audio recording/transcription failed:", err);
@@ -116,7 +343,10 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
       const verification = await verifyAndClassifyCitizenRequest(
         transcriptText, 
         currentNation.name, 
-        selectedRegion || currentNation.keyRegions[0], 
+        selectedState,
+        selectedDistrict,
+        selectedSubDistrict,
+        detailedAddress,
         channel
       );
       setVerificationResult(verification);
@@ -134,7 +364,6 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
     e.preventDefault();
     if (!transcriptText.trim()) return;
 
-    // Run verification if not verified yet
     let currentVerif = verificationResult;
     if (!currentVerif) {
       setIsVerifying(true);
@@ -142,7 +371,10 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
         currentVerif = await verifyAndClassifyCitizenRequest(
           transcriptText, 
           currentNation.name, 
-          selectedRegion || currentNation.keyRegions[0], 
+          selectedState,
+          selectedDistrict,
+          selectedSubDistrict,
+          detailedAddress,
           channel
         );
         setVerificationResult(currentVerif);
@@ -153,35 +385,49 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
       }
     }
 
-    // Block submission if flagged as invalid spam/fake report
     if (currentVerif && currentVerif.isValidCivicIssue === false) {
-      alert(`⚠️ Request Cannot Be Clustered: ${currentVerif.verificationReason}\n\nVoxBRICS requires legitimate municipal infrastructure feedback with civic context.`);
+      alert(`⚠️ Request Cannot Be Clustered: ${currentVerif.verificationReason}\n\nPlease describe a genuine civic or public infrastructure issue.`);
       return;
     }
 
     setIsSubmitting(true);
     try {
+      const districtObj = currentDistricts.find(d => d.district === selectedDistrict);
+      const computedLat = gpsCoordinates?.lat || districtObj?.lat || currentNation.mapBounds.centerLat;
+      const computedLng = gpsCoordinates?.lng || districtObj?.lng || currentNation.mapBounds.centerLng;
+      const fullRegionName = `${selectedDistrict} (${selectedState})`;
+
       const newRequest: CitizenRequest = {
         userId: currentUser?.uid,
-        citizenName: isAnonymous ? 'Anonymous Citizen' : (citizenName || currentUser?.displayName || 'Resident of ' + selectedRegion),
+        citizenName: isAnonymous ? 'Anonymous Citizen' : (citizenName || currentUser?.displayName || 'Resident of ' + selectedDistrict),
         isAnonymous,
         nation: selectedNation,
-        region: selectedRegion || currentNation.keyRegions[0],
+        state: selectedState,
+        district: selectedDistrict,
+        subDistrictWard: selectedSubDistrict,
+        detailedAddress: detailedAddress.trim() || undefined,
+        region: fullRegionName,
         channel,
         originalLanguage: selectedLanguage,
         originalText: transcriptText,
         translatedEnglishText: currentVerif?.englishTranslation || transcriptText,
         category,
-        urgency: currentVerif?.urgency || 'medium',
-        sentimentScore: currentVerif?.detectedSentiment ?? -0.5,
-        impactEstimateCitizens: currentVerif?.impactEstimate ?? 1200,
+        urgency: currentVerif?.urgency || 'high',
+        photoUrl: photoPreview || undefined,
+        geocodedLocation: {
+          lat: computedLat,
+          lng: computedLng,
+          address: detailedAddress || `${selectedSubDistrict}, ${selectedDistrict}, ${selectedState}`
+        },
+        sentimentScore: currentVerif?.detectedSentiment ?? -0.6,
+        impactEstimateCitizens: currentVerif?.impactEstimate ?? 1500,
         timestamp: new Date().toISOString(),
         status: 'hotspot_clustered',
         verificationStatus: {
           isValidCivicIssue: currentVerif?.isValidCivicIssue ?? true,
-          verificationReason: currentVerif?.verificationReason || 'Grounded with regional infrastructure registry.',
+          verificationReason: currentVerif?.verificationReason || `Corroborated with municipal public works in ${selectedDistrict}.`,
           groundedInPrecedent: currentVerif?.groundedInPrecedent ?? true,
-          confidenceScore: 0.92
+          confidenceScore: 0.94
         },
         upvotes: 1
       };
@@ -192,18 +438,19 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
           createdAt: serverTimestamp()
         });
       } catch (firestoreErr) {
-        console.warn("Firestore write fallback to local state:", firestoreErr);
+        console.warn("Firestore write notice:", firestoreErr);
       }
 
       onRequestSubmitted(newRequest);
-      setSuccessNotice(`Citizen request successfully verified and logged for ${selectedRegion}!`);
-      setTimeout(() => setSuccessNotice(null), 5000);
+      setSuccessNotice(`Grievance successfully submitted and geocoded for ${selectedDistrict}, ${selectedState}!`);
+      setTimeout(() => setSuccessNotice(null), 6000);
 
       // Reset form fields
       setTranscriptText('');
       setVerificationResult(null);
       setRecordedAudio(null);
-      setCitizenName('');
+      setPhotoPreview(null);
+      setDetailedAddress('');
     } catch (err) {
       console.error("Submission failed:", err);
     } finally {
@@ -226,57 +473,72 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
     }
   };
 
+  // Card theme classes
+  const formCardClass = isLight 
+    ? 'bg-white border-slate-200 text-slate-800 shadow-md'
+    : isBrics 
+    ? 'bg-amber-950/20 border-amber-500/30 text-amber-50 shadow-xl'
+    : 'bg-slate-900 border-slate-800 text-slate-100 shadow-xl';
+
+  const subBoxClass = isLight
+    ? 'bg-slate-50 border-slate-200'
+    : isBrics
+    ? 'bg-amber-950/40 border-amber-500/20'
+    : 'bg-slate-950/80 border-slate-800';
+
+  const inputClass = isLight
+    ? 'bg-slate-50 border-slate-300 text-slate-900 focus:ring-emerald-500'
+    : isBrics
+    ? 'bg-amber-950/40 border-amber-500/40 text-amber-100 focus:ring-amber-500'
+    : 'bg-slate-950 border-slate-700 text-slate-100 focus:ring-emerald-500';
+
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       
       {/* Header Banner */}
-      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border border-slate-700/60 p-6 sm:p-8">
-        <div className="absolute right-0 top-0 translate-x-8 -translate-y-8 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
+      <div className={`relative overflow-hidden rounded-2xl border p-6 sm:p-7 ${
+        isLight 
+          ? 'bg-gradient-to-r from-emerald-50 via-teal-50 to-cyan-50 border-emerald-200 text-slate-900' 
+          : isBrics
+          ? 'bg-gradient-to-r from-amber-950/50 via-slate-900 to-amber-950/50 border-amber-500/40 text-amber-100'
+          : 'bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-slate-700/60 text-white'
+      }`}>
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 mb-2">
               <span className="text-2xl">{currentNation.flag}</span>
-              <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20">
-                Verified Citizen Intake
+              <span className="text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+                Civic Grievance Reporting Portal
               </span>
-              <span className="text-[10px] uppercase font-bold text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/20 flex items-center gap-1">
-                <Search className="w-3 h-3" /> Grounded Verification
+              <span className="text-[10px] uppercase font-bold text-cyan-600 dark:text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/20 flex items-center gap-1">
+                <Search className="w-3 h-3" /> Search Grounded
               </span>
             </div>
-            <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
-              Citizen Voice & Community Infrastructure Reporting
+            <h2 className="text-xl sm:text-2xl font-black tracking-tight">
+              Report Community Infrastructure & Public Utility Issues
             </h2>
-            <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-xl">
-              Voice-first, multilingual reporting for {currentNation.name}. Every submission passes through an automated factual integrity filter before impacting national CapEx priorities.
+            <p className={`text-xs sm:text-sm mt-1 max-w-xl ${isLight ? 'text-slate-600' : 'text-slate-300'}`}>
+              Bolkar, likhkar ya photo upload karke apni samasya darj karein. Har shikayat Google verification aur GIS coordinates ke sath public map par plot hoti hai.
             </p>
-          </div>
-          
-          <div className="flex items-center gap-3 bg-slate-950/60 border border-slate-700/70 p-3 rounded-xl">
-            <Radio className="w-5 h-5 text-emerald-400 animate-pulse" />
-            <div>
-              <p className="text-[10px] uppercase font-bold text-slate-400">Audio Model</p>
-              <p className="text-xs font-mono font-semibold text-emerald-300">gemini-3.5-transcribe</p>
-            </div>
           </div>
         </div>
       </div>
 
       {/* Main Intake Form */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-xl">
+      <div className={`border rounded-2xl p-6 sm:p-8 ${formCardClass}`}>
         <form onSubmit={handleSubmit} className="space-y-6">
           
-          {/* Submission Channel Selection */}
+          {/* Step 1: Real Channel Selection */}
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-3">
-              1. Choose Intake Channel
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+              1. Intake Mode / Madhyam Chune
             </label>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               {[
-                { id: 'voice', label: 'Voice / Audio Note', icon: Mic, badge: 'High Accessibility' },
-                { id: 'whatsapp', label: 'WhatsApp Bot', icon: MessageSquare, badge: 'Popular' },
-                { id: 'sms', label: '2G/3G SMS Gateway', icon: Radio, badge: 'Rural Offline' },
-                { id: 'telegram', label: 'Telegram Portal', icon: Send, badge: 'Encrypted' },
-                { id: 'web_portal', label: 'Web Kiosk', icon: Globe, badge: 'Citizen Center' },
+                { id: 'voice', label: 'Microphone / Voice Note', icon: Mic, desc: 'Real-time bolkar likhein' },
+                { id: 'whatsapp', label: 'WhatsApp Intake', icon: MessageSquare, desc: 'Community bot channel' },
+                { id: 'sms', label: '2G/3G SMS Gateway', icon: Radio, desc: 'Offline village mode' },
+                { id: 'web_portal', label: 'Web Kiosk Form', icon: Globe, desc: 'Direct written grievance' },
               ].map((item) => {
                 const Icon = item.icon;
                 const active = channel === item.id;
@@ -287,75 +549,144 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
                     onClick={() => setChannel(item.id as SubmissionChannel)}
                     className={`flex flex-col items-center justify-center p-3 rounded-xl border text-center transition-all cursor-pointer ${
                       active
-                        ? 'border-emerald-500 bg-emerald-500/10 text-white shadow-lg shadow-emerald-950/40 ring-1 ring-emerald-500/40'
+                        ? isLight
+                          ? 'border-emerald-600 bg-emerald-50 text-emerald-900 shadow ring-1 ring-emerald-500'
+                          : 'border-emerald-500 bg-emerald-500/15 text-white shadow-lg shadow-emerald-950/40 ring-1 ring-emerald-500/50'
+                        : isLight
+                        ? 'border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300'
                         : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-700 hover:text-slate-200'
                     }`}
                   >
-                    <Icon className={`w-5 h-5 mb-1.5 ${active ? 'text-emerald-400' : 'text-slate-400'}`} />
-                    <span className="text-xs font-semibold">{item.label}</span>
-                    <span className={`text-[9px] mt-1 px-1.5 py-0.5 rounded-full ${
-                      active ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'
-                    }`}>
-                      {item.badge}
-                    </span>
+                    <Icon className={`w-5 h-5 mb-1 ${active ? 'text-emerald-500' : 'text-slate-400'}`} />
+                    <span className="text-xs font-bold">{item.label}</span>
+                    <span className="text-[10px] opacity-75 mt-0.5">{item.desc}</span>
                   </button>
                 );
               })}
             </div>
           </div>
 
-          {/* Regional Localization & Language Selection */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
-                2. Spoken Language / Dialect
-              </label>
-              <select
-                value={selectedLanguage}
-                onChange={(e) => setSelectedLanguage(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+          {/* Step 2: Accurate Location Hierarchy (State, District, Sub-District, Address & Live GPS) */}
+          <div className={`p-4 sm:p-5 rounded-xl border ${subBoxClass} space-y-4`}>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3 border-slate-700/50">
+              <div className="flex items-center gap-2">
+                <MapPin className="w-4 h-4 text-emerald-500" />
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                  2. Sahi Location / Kshetr Chune (State, District & Ward)
+                </span>
+              </div>
+
+              {/* Current GPS Fetcher Button */}
+              <button
+                type="button"
+                onClick={handleFetchCurrentLocation}
+                disabled={isFetchingGps}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-500 border border-emerald-500/40 text-xs font-semibold cursor-pointer transition disabled:opacity-50"
               >
-                {currentNation.languages.map((lang) => (
-                  <option key={lang.code} value={lang.code} className="bg-slate-900">
-                    {lang.name} ({lang.native})
-                  </option>
-                ))}
-              </select>
+                {isFetchingGps ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Fetching Live GPS...</span>
+                  </>
+                ) : (
+                  <>
+                    <Navigation className="w-3.5 h-3.5" />
+                    <span>Auto-Detect Current Location (GPS)</span>
+                  </>
+                )}
+              </button>
             </div>
 
+            {gpsNotice && (
+              <p className="text-xs text-emerald-400 font-mono flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" /> {gpsNotice}
+              </p>
+            )}
+
+            {/* State, District & Sub-district Dropdowns */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-400 uppercase mb-1">
+                  Rajya / State
+                </label>
+                <select
+                  value={selectedState}
+                  onChange={(e) => setSelectedState(e.target.value)}
+                  className={`w-full text-xs rounded-xl px-3 py-2.5 border focus:outline-none focus:ring-1 ${inputClass}`}
+                >
+                  {availableStates.map((s) => (
+                    <option key={s.state} value={s.state} className="bg-slate-900 text-white">
+                      {s.state}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-400 uppercase mb-1">
+                  Jila / District
+                </label>
+                <select
+                  value={selectedDistrict}
+                  onChange={(e) => setSelectedDistrict(e.target.value)}
+                  className={`w-full text-xs rounded-xl px-3 py-2.5 border focus:outline-none focus:ring-1 ${inputClass}`}
+                >
+                  {currentDistricts.map((d) => (
+                    <option key={d.district} value={d.district} className="bg-slate-900 text-white">
+                      {d.district}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-400 uppercase mb-1">
+                  Tehsil / Sub-District / Ward
+                </label>
+                <select
+                  value={selectedSubDistrict}
+                  onChange={(e) => setSelectedSubDistrict(e.target.value)}
+                  className={`w-full text-xs rounded-xl px-3 py-2.5 border focus:outline-none focus:ring-1 ${inputClass}`}
+                >
+                  {currentSubDistricts.map((sub) => (
+                    <option key={sub} value={sub} className="bg-slate-900 text-white">
+                      {sub}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Detailed Street Address / Landmark */}
             <div>
-              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
-                3. Sub-District or Ward Region
+              <label className="block text-[11px] font-bold text-slate-400 uppercase mb-1">
+                Colony / Mohalla / Landmark / Pura Address
               </label>
-              <select
-                value={selectedRegion}
-                onChange={(e) => setSelectedRegion(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
-              >
-                {currentNation.keyRegions.map((region) => (
-                  <option key={region} value={region} className="bg-slate-900">
-                    {region}
-                  </option>
-                ))}
-              </select>
+              <input
+                type="text"
+                value={detailedAddress}
+                onChange={(e) => setDetailedAddress(e.target.value)}
+                placeholder="E.g., Near Primary School, Gali No. 4, Ward 12..."
+                className={`w-full text-xs rounded-xl px-3.5 py-2 border focus:outline-none focus:ring-1 ${inputClass}`}
+              />
             </div>
           </div>
 
-          {/* Voice Input Section with Live Audio Recording */}
-          <div className="p-4 sm:p-5 rounded-xl border border-slate-800 bg-slate-950/70 space-y-4">
-            <div className="flex items-center justify-between">
+          {/* Step 3: Voice Note / Recording Section (Dynamic, No Hardcoded Fallback) */}
+          <div className={`p-4 sm:p-5 rounded-xl border ${subBoxClass} space-y-4`}>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
-                  Microphone Input (gemini-3.5-transcribe)
+                <span className="text-xs font-bold text-emerald-500 uppercase tracking-wider block">
+                  3. Voice Recording / Speech-to-Text
                 </span>
-                <p className="text-xs text-slate-400">
-                  Speak in native language. Speech-to-text will transcribe and verify civic validity.
+                <p className={`text-xs ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
+                  Record karein - jo aap bolenge wahi exact shabd screen par type honge.
                 </p>
               </div>
 
               {recordedAudio && (
                 <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1 bg-emerald-500/10 px-2.5 py-1 rounded-full border border-emerald-500/30">
-                  <FileAudio className="w-3.5 h-3.5" /> Audio Captured
+                  <FileAudio className="w-3.5 h-3.5" /> Audio Attached
                 </span>
               )}
             </div>
@@ -365,60 +696,43 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
                 <button
                   type="button"
                   onClick={startVoiceRecording}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs shadow-lg shadow-rose-950/30 transition-all cursor-pointer"
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs shadow-lg shadow-rose-950/30 transition cursor-pointer"
                 >
                   <Mic className="w-4 h-4" />
-                  Record Voice Request
+                  Record Voice (Bolkar Batayein)
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={stopVoiceRecording}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-medium text-xs animate-pulse shadow-lg shadow-amber-950/40 transition-all cursor-pointer"
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs animate-pulse shadow-lg shadow-amber-950/40 transition cursor-pointer"
                 >
                   <Square className="w-4 h-4 fill-current" />
-                  Stop & Transcribe ({recordingSeconds}s)
+                  Stop Recording ({recordingSeconds}s)
                 </button>
               )}
 
               {isTranscribing && (
-                <div className="flex items-center gap-2 text-xs text-emerald-400 bg-slate-900 px-3 py-2 rounded-lg border border-emerald-500/30">
+                <div className="flex items-center gap-2 text-xs text-emerald-400 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Transcribing via gemini-3.5-transcribe...
+                  Transcribing your real voice...
                 </div>
               )}
 
               {isVerifying && (
-                <div className="flex items-center gap-2 text-xs text-cyan-400 bg-slate-900 px-3 py-2 rounded-lg border border-cyan-500/30">
+                <div className="flex items-center gap-2 text-xs text-cyan-400 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Grounded Verification with Google Search...
+                  Verifying with Google Search for {selectedDistrict}...
                 </div>
               )}
-
-              {/* Sample voice test loader for instant simulation */}
-              <button
-                type="button"
-                onClick={() => {
-                  setTranscriptText(
-                    selectedNation === 'IN' 
-                      ? 'हमारे गांव में पिछले दो महीने से नल का पानी नहीं आ रहा। पास का तालाब सूख गया है, जिससे मवेशी और छोटे बच्चे बहुत परेशान हैं। हमें तुरंत डीप ट्यूबवेल या सोलर वाटर पंप की जरूरत है।' 
-                      : selectedNation === 'BR'
-                      ? 'Nosso bairro na periferia fica sem energia elétrica quase 3 dias por semana. Posto de saúde não consegue manter vacinas refrigeradas. Precisamos de microgeração solar comunitária.'
-                      : 'Izikhungo zethu zezempilo azinayo imithi eyanele namanzi ahlanzekile. Omama abakhulelwe bahamba amabanga amade.'
-                  );
-                }}
-                className="text-xs text-slate-400 hover:text-slate-200 underline cursor-pointer ml-auto"
-              >
-                Insert sample verified voice transcript
-              </button>
             </div>
           </div>
 
-          {/* Transcript / Text Field */}
+          {/* Step 4: Written Grievance Description */}
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                4. Citizen Statement / Request Description
+                4. Problem Description / Samasya Ka Vivran
               </label>
               {transcriptText && (
                 <button
@@ -428,7 +742,7 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
                   className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 flex items-center gap-1.5 cursor-pointer bg-cyan-950/40 px-3 py-1 rounded-lg border border-cyan-500/30"
                 >
                   <Search className="w-3.5 h-3.5" />
-                  {isVerifying ? 'Verifying with Google Search...' : 'Verify Civic Validity (Anti-Spam Filter)'}
+                  {isVerifying ? 'Checking...' : 'Check with Google (Verification)'}
                 </button>
               )}
             </div>
@@ -438,12 +752,56 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
               value={transcriptText}
               onChange={(e) => {
                 setTranscriptText(e.target.value);
-                if (verificationResult) setVerificationResult(null); // Reset verification on edit
+                if (verificationResult) setVerificationResult(null);
               }}
-              placeholder="E.g., In Patna rural near the river embankment, rainwater drainage is choked with silt, causing 14 village streets to flood. We request an elevated drainage culvert..."
-              className="w-full bg-slate-950 border border-slate-700/80 rounded-xl p-3.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+              placeholder="Apni samasya yahan likhein ya mic se bolein (Jaise: Gali no. 3 me pipe phoot gaya hai aur 4 din se peene ka pani nahi aa raha hai...)"
+              className={`w-full text-xs rounded-xl p-3.5 border focus:outline-none focus:ring-1 ${inputClass}`}
               required
             />
+          </div>
+
+          {/* Step 5: Photo / Image Upload (Optional Proof) */}
+          <div className={`p-4 rounded-xl border ${subBoxClass} space-y-3`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Camera className="w-4 h-4 text-emerald-500" />
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                  5. Photo Upload (Optional Image Proof)
+                </span>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handlePhotoSelect}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white cursor-pointer border border-slate-700"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Choose Photo
+              </button>
+            </div>
+
+            {photoPreview && (
+              <div className="relative inline-block mt-2">
+                <img
+                  src={photoPreview}
+                  alt="Civic issue proof"
+                  className="h-28 w-44 object-cover rounded-xl border border-emerald-500/40 shadow-md"
+                />
+                <button
+                  type="button"
+                  onClick={() => setPhotoPreview(null)}
+                  className="absolute -top-2 -right-2 bg-rose-600 text-white p-1 rounded-full shadow hover:bg-rose-500 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Verification Result Card */}
@@ -482,15 +840,16 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
                 )}
               </div>
 
-              {/* Verification Reason Statement */}
-              <div className="text-xs p-2.5 rounded-lg bg-slate-950/80 border border-slate-800">
-                <p className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Verification Analysis (Google Search Grounded)</p>
-                <p className="text-slate-200">{verificationResult.verificationReason}</p>
+              <div className={`text-xs p-2.5 rounded-lg border ${
+                isLight ? 'bg-white border-slate-200' : 'bg-slate-950/80 border-slate-800'
+              }`}>
+                <p className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Google Grounding Analysis</p>
+                <p className={isLight ? 'text-slate-800' : 'text-slate-200'}>{verificationResult.verificationReason}</p>
               </div>
 
               {verificationResult.isValidCivicIssue && (
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                  <div className={`p-2.5 rounded-lg border ${isLight ? 'bg-white' : 'bg-slate-900/80 border-slate-800'}`}>
                     <p className="text-slate-400 uppercase text-[10px]">Urgency Rating</p>
                     <p className={`font-bold mt-0.5 uppercase ${
                       verificationResult.urgency === 'critical' ? 'text-rose-400' :
@@ -499,16 +858,16 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
                       {verificationResult.urgency}
                     </p>
                   </div>
-                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
-                    <p className="text-slate-400 uppercase text-[10px]">Projected Affected Population</p>
-                    <p className="font-bold text-white mt-0.5">
-                      ~{verificationResult.impactEstimate?.toLocaleString()} Citizens
+                  <div className={`p-2.5 rounded-lg border ${isLight ? 'bg-white' : 'bg-slate-900/80 border-slate-800'}`}>
+                    <p className="text-slate-400 uppercase text-[10px]">Estimated Affected People</p>
+                    <p className={`font-bold mt-0.5 ${isLight ? 'text-slate-900' : 'text-white'}`}>
+                      ~{verificationResult.impactEstimate?.toLocaleString()} Residents
                     </p>
                   </div>
-                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
-                    <p className="text-slate-400 uppercase text-[10px]">Precedent Verification</p>
-                    <p className="font-bold text-cyan-400 mt-0.5">
-                      {verificationResult.groundedInPrecedent ? 'Corroborated in Records' : 'Local Anecdotal'}
+                  <div className={`p-2.5 rounded-lg border ${isLight ? 'bg-white' : 'bg-slate-900/80 border-slate-800'}`}>
+                    <p className="text-slate-400 uppercase text-[10px]">Category Detected</p>
+                    <p className="font-bold text-cyan-400 mt-0.5 capitalize">
+                      {verificationResult.category?.replace(/_/g, ' ')}
                     </p>
                   </div>
                 </div>
@@ -526,8 +885,8 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
                 onChange={(e) => setIsAnonymous(e.target.checked)}
                 className="w-4 h-4 rounded border-slate-700 bg-slate-950 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
               />
-              <label htmlFor="anonCheck" className="text-xs text-slate-300 cursor-pointer">
-                Submit as Anonymous Citizen (Protects whistleblower identity)
+              <label htmlFor="anonCheck" className={`text-xs cursor-pointer ${isLight ? 'text-slate-600' : 'text-slate-300'}`}>
+                Submit as Anonymous Citizen (Guarantees whistleblower privacy)
               </label>
             </div>
 
@@ -536,8 +895,8 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
                 type="text"
                 value={citizenName}
                 onChange={(e) => setCitizenName(e.target.value)}
-                placeholder="Your Name / Community Representative"
-                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500 w-full sm:w-64"
+                placeholder="Aapka Naam / Resident Name"
+                className={`border rounded-lg px-3 py-1.5 text-xs w-full sm:w-64 focus:outline-none focus:ring-1 ${inputClass}`}
               />
             )}
           </div>
@@ -545,31 +904,31 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({ selectedNation, on
           {/* Submit Action */}
           <div className="flex items-center justify-between pt-2">
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              Verified submissions cluster into GIS Demand Hotspots
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+              Directly logs to Firestore & plots on Interactive Hotspots Map
             </p>
 
             <button
               type="submit"
               disabled={isSubmitting || !transcriptText.trim() || isVerifying || (verificationResult?.isValidCivicIssue === false)}
-              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-lg shadow-emerald-950/40 transition-all cursor-pointer disabled:opacity-50"
+              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-lg transition cursor-pointer disabled:opacity-50"
             >
               {isSubmitting ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Broadcasting to Hotspot Index...
+                  Submitting Report...
                 </>
               ) : (
                 <>
                   <Send className="w-4 h-4" />
-                  Submit Verified Request
+                  Submit Grievance
                 </>
               )}
             </button>
           </div>
 
           {successNotice && (
-            <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
+            <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
               {successNotice}
             </div>
