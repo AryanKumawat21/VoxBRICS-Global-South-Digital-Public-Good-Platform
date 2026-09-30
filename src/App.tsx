@@ -11,7 +11,7 @@ import { INITIAL_HOTSPOTS, INITIAL_CITIZEN_REQUESTS, BRICS_NATIONS } from './dat
 import { BRICSNationCode, HotspotCluster, CitizenRequest, AppTheme } from './types';
 import { auth, db, getStoredUser, AppUserProfile } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, onSnapshot, query, orderBy, limit, doc, deleteDoc } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, limit, doc, deleteDoc, updateDoc } from 'firebase/firestore';
 import confetti from 'canvas-confetti';
 
 export default function App() {
@@ -85,7 +85,8 @@ export default function App() {
               groundedInPrecedent: true,
               confidenceScore: 0.92
             },
-            upvotes: data.upvotes || 1
+            upvotes: data.upvotes ?? 1,
+            downvotes: data.downvotes ?? 0
           });
         });
 
@@ -132,6 +133,62 @@ export default function App() {
       }
     } catch (e) {
       console.warn("Firestore delete notice:", e);
+    }
+  };
+
+  const handleVoteRequest = async (requestId: string, type: 'up' | 'down') => {
+    setCitizenRequests(prev => {
+      const updated = prev.map(r => {
+        const idMatch = (r.id && r.id === requestId) || (r.timestamp && r.timestamp === requestId);
+        if (!idMatch) return r;
+
+        const currentUp = r.upvotes || 0;
+        const currentDown = r.downvotes || 0;
+        const nextUp = type === 'up' ? currentUp + 1 : currentUp;
+        const nextDown = type === 'down' ? currentDown + 1 : currentDown;
+
+        return {
+          ...r,
+          upvotes: nextUp,
+          downvotes: nextDown
+        };
+      });
+
+      // Community AI Moderation Rule:
+      // If a report receives excessive downvotes (downvotes >= 3 and downvotes > upvotes), auto-remove it!
+      const filtered = updated.filter(r => {
+        const down = r.downvotes || 0;
+        const up = r.upvotes || 0;
+        const isExcessiveNegative = down >= 3 && (down - up) >= 2;
+        if (isExcessiveNegative) {
+          // Asynchronously delete from firestore as well
+          if (r.id && !r.id.startsWith('req-init')) {
+            deleteDoc(doc(db, 'citizen_requests', r.id)).catch(() => {});
+          }
+          return false;
+        }
+        return true;
+      });
+
+      return filtered;
+    });
+
+    // Update Firestore in background
+    try {
+      if (requestId && !requestId.startsWith('req-init')) {
+        const reqRef = doc(db, 'citizen_requests', requestId);
+        const reqItem = citizenRequests.find(r => r.id === requestId);
+        if (reqItem) {
+          const nextUp = type === 'up' ? (reqItem.upvotes || 0) + 1 : (reqItem.upvotes || 0);
+          const nextDown = type === 'down' ? (reqItem.downvotes || 0) + 1 : (reqItem.downvotes || 0);
+          await updateDoc(reqRef, {
+            upvotes: nextUp,
+            downvotes: nextDown
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Vote Firestore sync notice:", e);
     }
   };
 
@@ -196,6 +253,7 @@ export default function App() {
             onSelectHotspot={handleSelectHotspot}
             onNavigateToPolicy={() => setCurrentTab('policymaker')}
             theme={theme}
+            onVoteRequest={handleVoteRequest}
           />
         )}
 

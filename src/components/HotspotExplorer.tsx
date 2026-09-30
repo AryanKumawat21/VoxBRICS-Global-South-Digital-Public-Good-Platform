@@ -18,6 +18,10 @@ import {
   ChevronRight, 
   X,
   Radio,
+  ThumbsUp,
+  ThumbsDown,
+  Check,
+  TrendingUp,
   Map as MapIcon
 } from 'lucide-react';
 import { APIProvider, Map, AdvancedMarker, Pin, InfoWindow, useMap } from '@vis.gl/react-google-maps';
@@ -31,6 +35,7 @@ interface HotspotExplorerProps {
   onSelectHotspot: (hotspot: HotspotCluster) => void;
   onNavigateToPolicy: () => void;
   theme?: AppTheme;
+  onVoteRequest?: (requestId: string, type: 'up' | 'down') => void;
 }
 
 // Controller to smoothly pan & zoom map when selectedNation changes
@@ -51,7 +56,8 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
   citizenRequests,
   onSelectHotspot,
   onNavigateToPolicy,
-  theme = 'dark'
+  theme = 'dark',
+  onVoteRequest
 }) => {
   const currentNation = BRICS_NATIONS[selectedNation];
   const isLight = theme === 'light';
@@ -62,6 +68,10 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
   const [selectedIssueModal, setSelectedIssueModal] = useState<CitizenRequest | null>(null);
   const [selectedPinInfo, setSelectedPinInfo] = useState<CitizenRequest | HotspotCluster | null>(null);
   const [mapType, setMapType] = useState<'roadmap' | 'satellite' | 'hybrid' | 'terrain'>('roadmap');
+
+  // Track user votes and local counts for instant reactive UI updates
+  const [userVoteState, setUserVoteState] = useState<Record<string, 'up' | 'down'>>({});
+  const [voteDelta, setVoteDelta] = useState<Record<string, { up: number; down: number }>>({});
 
   // Filter requests belonging to this nation
   const nationRequests = citizenRequests.filter(r => r.nation === selectedNation);
@@ -90,6 +100,60 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
     lng: currentNation.mapBounds.centerLng
   };
   const mapZoom = currentNation.mapBounds.zoom || 5;
+
+  const handleVote = (e: React.MouseEvent, req: CitizenRequest, type: 'up' | 'down') => {
+    e.stopPropagation();
+    const reqKey = req.id || req.timestamp;
+    if (!reqKey) return;
+
+    const previousVote = userVoteState[reqKey];
+
+    // Calculate delta for instant visual response
+    setVoteDelta(prev => {
+      const current = prev[reqKey] || { up: 0, down: 0 };
+      if (previousVote === type) {
+        // user clicked same button again: toggle off
+        return {
+          ...prev,
+          [reqKey]: {
+            up: type === 'up' ? current.up - 1 : current.up,
+            down: type === 'down' ? current.down - 1 : current.down
+          }
+        };
+      } else if (previousVote) {
+        // user switched vote from up to down or down to up
+        return {
+          ...prev,
+          [reqKey]: {
+            up: type === 'up' ? current.up + 1 : current.up - 1,
+            down: type === 'down' ? current.down + 1 : current.down - 1
+          }
+        };
+      } else {
+        // fresh vote
+        return {
+          ...prev,
+          [reqKey]: {
+            up: type === 'up' ? current.up + 1 : current.up,
+            down: type === 'down' ? current.down + 1 : current.down
+          }
+        };
+      }
+    });
+
+    setUserVoteState(prev => {
+      if (prev[reqKey] === type) {
+        const copy = { ...prev };
+        delete copy[reqKey];
+        return copy;
+      }
+      return { ...prev, [reqKey]: type };
+    });
+
+    if (onVoteRequest) {
+      onVoteRequest(reqKey, type);
+    }
+  };
 
   // Theme styling helpers
   const cardClass = isLight 
@@ -134,11 +198,11 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
         </div>
 
         <div className={`p-4 rounded-xl border ${cardClass}`}>
-          <span className="text-[10px] uppercase font-bold text-slate-400">Verified by Google Search</span>
+          <span className="text-[10px] uppercase font-bold text-slate-400">Community Verified</span>
           <p className="text-xl sm:text-2xl font-black text-cyan-500 mt-1">
-            {nationRequests.filter(r => r.verificationStatus?.isValidCivicIssue).length}
+            {nationRequests.filter(r => (r.upvotes || 0) >= (r.downvotes || 0)).length}
           </p>
-          <span className="text-xs text-slate-400">Anti-Spam Filtered</span>
+          <span className="text-xs text-slate-400">Citizen Vote Backed</span>
         </div>
 
         <div className={`p-4 rounded-xl border ${cardClass}`}>
@@ -309,7 +373,7 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
                 <span className="w-2.5 h-2.5 rounded-full bg-amber-500" /> High Urgency
               </span>
               <span className="flex items-center gap-1.5 font-medium">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" /> Normal / Verified
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" /> Normal / Community Verified
               </span>
             </div>
           </div>
@@ -401,7 +465,7 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
 
       </div>
 
-      {/* Live Problems Feed Grid (Categorized Feed) */}
+      {/* Live Problems Feed Grid with Right/Wrong Community Voting */}
       <div className={`rounded-2xl border p-5 sm:p-6 space-y-4 ${cardClass}`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
@@ -409,7 +473,7 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
               Community Grievance Feed ({currentNation.name})
             </h4>
             <p className="text-xs text-slate-400">
-              Citizens dwara upload ki gayi problems, photos, aur unki live location.
+              Har koi report darj kar sakta hai. Community <strong>Right (✓ Real)</strong> ya <strong>Wrong (✗ Fake)</strong> vote de sakti hai.
             </p>
           </div>
 
@@ -432,47 +496,108 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredRequests.map((req, idx) => (
-            <div
-              key={req.id || idx}
-              onClick={() => setSelectedIssueModal(req)}
-              className={`p-4 rounded-xl border transition cursor-pointer hover:border-emerald-500/50 flex flex-col justify-between space-y-3 ${subCardClass}`}
-            >
-              <div>
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <span className="text-[10px] font-bold text-emerald-500 flex items-center gap-1 uppercase truncate">
-                    <MapPin className="w-3 h-3 text-cyan-500 shrink-0" />
-                    {req.region}
-                  </span>
-                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase shrink-0 ${
-                    req.urgency === 'critical' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
-                    req.urgency === 'high' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
-                    'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  }`}>
-                    {req.urgency}
-                  </span>
+          {filteredRequests.map((req, idx) => {
+            const reqKey = req.id || req.timestamp || `req-${idx}`;
+            const userVote = userVoteState[reqKey];
+            const delta = voteDelta[reqKey] || { up: 0, down: 0 };
+            const upvotes = Math.max(0, (req.upvotes || 0) + delta.up);
+            const downvotes = Math.max(0, (req.downvotes || 0) + delta.down);
+            const isHighSupport = upvotes > 3 && upvotes > downvotes;
+            const isFlaggedWrong = downvotes > 2 && downvotes >= upvotes;
+
+            return (
+              <div
+                key={reqKey}
+                onClick={() => setSelectedIssueModal(req)}
+                className={`p-4 rounded-xl border transition cursor-pointer flex flex-col justify-between space-y-3 ${
+                  isFlaggedWrong 
+                    ? 'border-rose-500/50 bg-rose-950/20 opacity-80' 
+                    : isHighSupport
+                    ? 'border-emerald-500/60 shadow-md'
+                    : 'hover:border-emerald-500/50'
+                } ${subCardClass}`}
+              >
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-[10px] font-bold text-emerald-500 flex items-center gap-1 uppercase truncate">
+                      <MapPin className="w-3 h-3 text-cyan-500 shrink-0" />
+                      {req.region}
+                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {isHighSupport && (
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-0.5">
+                          <TrendingUp className="w-2.5 h-2.5" /> High Priority
+                        </span>
+                      )}
+                      {isFlaggedWrong && (
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/30 flex items-center gap-0.5">
+                          <AlertTriangle className="w-2.5 h-2.5" /> Flagged Fake
+                        </span>
+                      )}
+                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                        req.urgency === 'critical' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
+                        req.urgency === 'high' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
+                        'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                      }`}>
+                        {req.urgency}
+                      </span>
+                    </div>
+                  </div>
+
+                  <p className="text-xs font-medium line-clamp-3 italic opacity-95">
+                    "{req.originalText}"
+                  </p>
+
+                  {req.photoUrl && (
+                    <div className="mt-2.5 flex items-center gap-1 text-[11px] text-cyan-400 bg-cyan-500/10 px-2 py-1 rounded-lg border border-cyan-500/20">
+                      <Camera className="w-3.5 h-3.5 shrink-0" />
+                      <span>Photo Proof Attached</span>
+                    </div>
+                  )}
                 </div>
 
-                <p className="text-xs font-medium line-clamp-3 italic opacity-95">
-                  "{req.originalText}"
-                </p>
+                {/* Bottom Row: By Author & Community Verification Right/Wrong Vote Buttons */}
+                <div className="pt-2 border-t border-slate-700/50 flex items-center justify-between text-[11px]">
+                  <span className="text-slate-400 truncate max-w-[120px]">
+                    By: <strong className={isLight ? 'text-slate-800' : 'text-slate-200'}>{req.citizenName || 'Resident'}</strong>
+                  </span>
 
-                {req.photoUrl && (
-                  <div className="mt-2.5 flex items-center gap-1 text-[11px] text-cyan-400 bg-cyan-500/10 px-2 py-1 rounded-lg border border-cyan-500/20">
-                    <Camera className="w-3.5 h-3.5 shrink-0" />
-                    <span>Photo Proof Attached</span>
+                  {/* 2 Right / Wrong Community Voting Buttons */}
+                  <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                    {/* Right / Real Issue Button */}
+                    <button
+                      type="button"
+                      onClick={(e) => handleVote(e, req, 'up')}
+                      title="Mark as Real Problem (Highlight)"
+                      className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border transition font-bold text-xs cursor-pointer ${
+                        userVote === 'up'
+                          ? 'bg-emerald-600 text-white border-emerald-400 shadow-md ring-1 ring-emerald-300'
+                          : 'bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-400 border-emerald-500/40'
+                      }`}
+                    >
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{upvotes}</span>
+                    </button>
+
+                    {/* Wrong / Fake Issue Button */}
+                    <button
+                      type="button"
+                      onClick={(e) => handleVote(e, req, 'down')}
+                      title="Mark as Wrong / Fake (Downvote to Auto-Remove)"
+                      className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border transition font-bold text-xs cursor-pointer ${
+                        userVote === 'down'
+                          ? 'bg-rose-600 text-white border-rose-400 shadow-md ring-1 ring-rose-300'
+                          : 'bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 border-rose-500/40'
+                      }`}
+                    >
+                      <X className="w-3.5 h-3.5 text-rose-400" />
+                      <span>{downvotes}</span>
+                    </button>
                   </div>
-                )}
+                </div>
               </div>
-
-              <div className="pt-2 border-t border-slate-700/50 flex items-center justify-between text-[11px] text-slate-400">
-                <span>By: <strong className={isLight ? 'text-slate-800' : 'text-slate-200'}>{req.citizenName || 'Citizen'}</strong></span>
-                <span className="text-emerald-500 font-semibold flex items-center gap-0.5">
-                  View <ChevronRight className="w-3 h-3" />
-                </span>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -527,16 +652,22 @@ export const HotspotExplorer: React.FC<HotspotExplorerProps> = ({
               )}
             </div>
 
-            {selectedIssueModal.verificationStatus?.verificationReason && (
-              <div className={`p-3 rounded-xl border text-xs ${
-                isLight ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300'
-              }`}>
-                <span className="text-[10px] font-bold uppercase flex items-center gap-1">
-                  <ShieldCheck className="w-3.5 h-3.5" /> Google Verification Note
+            {/* Live Community Vote Count in Modal */}
+            <div className={`p-3 rounded-xl border flex items-center justify-between text-xs ${subCardClass}`}>
+              <span className="text-slate-300 font-semibold">Community Verification:</span>
+              <div className="flex items-center gap-3 font-bold">
+                <span className="text-emerald-400 flex items-center gap-1">
+                  <Check className="w-3.5 h-3.5" /> {
+                    Math.max(0, (selectedIssueModal.upvotes || 0) + (voteDelta[selectedIssueModal.id || selectedIssueModal.timestamp]?.up || 0))
+                  } Real Votes
                 </span>
-                <p className="mt-0.5">{selectedIssueModal.verificationStatus.verificationReason}</p>
+                <span className="text-rose-400 flex items-center gap-1">
+                  <X className="w-3.5 h-3.5" /> {
+                    Math.max(0, (selectedIssueModal.downvotes || 0) + (voteDelta[selectedIssueModal.id || selectedIssueModal.timestamp]?.down || 0))
+                  } Wrong Votes
+                </span>
               </div>
-            )}
+            </div>
 
             <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-700/60">
               <span>Impact: ~{selectedIssueModal.impactEstimateCitizens?.toLocaleString()} citizens</span>

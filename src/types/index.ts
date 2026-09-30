@@ -76,6 +76,7 @@ export interface CitizenRequest {
     confidenceScore: number;
   };
   upvotes?: number;
+  downvotes?: number;
   verifiedLocalId?: string;
 }
 

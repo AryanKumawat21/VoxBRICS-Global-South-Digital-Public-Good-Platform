@@ -385,10 +385,9 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({
       }
     }
 
-    if (currentVerif && currentVerif.isValidCivicIssue === false) {
-      alert(`⚠️ Request Cannot Be Clustered: ${currentVerif.verificationReason}\n\nPlease describe a genuine civic or public infrastructure issue.`);
-      return;
-    }
+    // If flagged by AI, don't hard block — let community verify & vote!
+    const effectiveCategory = currentVerif?.category || category;
+    const effectiveUrgency = currentVerif?.urgency === 'invalid_spam' ? 'medium' : (currentVerif?.urgency || 'high');
 
     setIsSubmitting(true);
     try {
@@ -411,8 +410,8 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({
         originalLanguage: selectedLanguage,
         originalText: transcriptText,
         translatedEnglishText: currentVerif?.englishTranslation || transcriptText,
-        category,
-        urgency: currentVerif?.urgency || 'high',
+        category: effectiveCategory as RequestCategory,
+        urgency: effectiveUrgency as any,
         photoUrl: photoPreview || undefined,
         geocodedLocation: {
           lat: computedLat,
@@ -424,12 +423,13 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({
         timestamp: new Date().toISOString(),
         status: 'hotspot_clustered',
         verificationStatus: {
-          isValidCivicIssue: currentVerif?.isValidCivicIssue ?? true,
-          verificationReason: currentVerif?.verificationReason || `Corroborated with municipal public works in ${selectedDistrict}.`,
-          groundedInPrecedent: currentVerif?.groundedInPrecedent ?? true,
+          isValidCivicIssue: true,
+          verificationReason: currentVerif?.verificationReason || `Citizen reported civic issue in ${selectedDistrict}, open for community voting.`,
+          groundedInPrecedent: true,
           confidenceScore: 0.94
         },
-        upvotes: 1
+        upvotes: 1,
+        downvotes: 0
       };
 
       try {
@@ -808,43 +808,35 @@ export const CitizenIntake: React.FC<CitizenIntakeProps> = ({
           {verificationResult && (
             <div className={`p-4 rounded-xl border space-y-3 ${
               verificationResult.isValidCivicIssue === false 
-                ? 'bg-rose-950/30 border-rose-500/50 text-rose-200' 
+                ? 'bg-amber-950/20 border-amber-500/40 text-amber-200' 
                 : 'bg-emerald-950/20 border-emerald-500/30'
             }`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  {verificationResult.isValidCivicIssue === false ? (
-                    <AlertOctagon className="w-4 h-4 text-rose-400" />
-                  ) : (
-                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  )}
-                  <span className={`text-xs font-bold uppercase tracking-wider ${
-                    verificationResult.isValidCivicIssue === false ? 'text-rose-400' : 'text-emerald-300'
-                  }`}>
-                    {verificationResult.isValidCivicIssue === false 
-                      ? 'Integrity Warning: Submission Rejected (Spam/Non-Civic)' 
-                      : 'Verified Civic Telemetry (Grounded with Precedent)'}
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-300">
+                    Citizen Telemetry Ready (Open for Community Voting)
                   </span>
                 </div>
 
-                {verificationResult.isValidCivicIssue && (
-                  <button
-                    type="button"
-                    onClick={() => handleReadAloud(verificationResult.englishTranslation)}
-                    disabled={isPlayingAudio}
-                    className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 px-2.5 py-1 rounded-lg border border-emerald-500/20 cursor-pointer"
-                  >
-                    <Volume2 className="w-3.5 h-3.5" />
-                    {isPlayingAudio ? 'Speaking...' : 'Listen via gemini-3.8-flash-tts'}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => handleReadAloud(verificationResult.englishTranslation)}
+                  disabled={isPlayingAudio}
+                  className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 px-2.5 py-1 rounded-lg border border-emerald-500/20 cursor-pointer"
+                >
+                  <Volume2 className="w-3.5 h-3.5" />
+                  {isPlayingAudio ? 'Speaking...' : 'Listen via gemini-3.8-flash-tts'}
+                </button>
               </div>
 
               <div className={`text-xs p-2.5 rounded-lg border ${
                 isLight ? 'bg-white border-slate-200' : 'bg-slate-950/80 border-slate-800'
               }`}>
-                <p className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Google Grounding Analysis</p>
-                <p className={isLight ? 'text-slate-800' : 'text-slate-200'}>{verificationResult.verificationReason}</p>
+                <p className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Community Validation Status</p>
+                <p className={isLight ? 'text-slate-800' : 'text-slate-200'}>
+                  {verificationResult.verificationReason || `Problem logged for ${selectedDistrict}. Local citizens can now vote Right (✓ Real) or Wrong (✗ Fake).`}
+                </p>
               </div>
 
               {verificationResult.isValidCivicIssue && (
